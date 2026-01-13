@@ -996,6 +996,11 @@ bool FileStream_GetFlags(TFileStream * pStream, LPDWORD pdwStreamFlags);
 bool FileStream_Replace(TFileStream * pStream, TFileStream * pNewStream);
 void FileStream_Close(TFileStream * pStream);
 
+// memory stream functions
+TFileStream * FileStream_OpenMemory(LPBYTE pbBuffer, size_t cbBuffer, DWORD dwStreamFlags);
+TFileStream * FileStream_CreateMemory(size_t cbInitialSize, DWORD dwStreamFlags);
+bool FileStream_GetBuffer(TFileStream * pStream, LPBYTE * ppbBuffer, size_t * pcbSize, bool bTransferOwnership);
+
 //-----------------------------------------------------------------------------
 // Functions prototypes for Storm.dll
 
@@ -1031,6 +1036,12 @@ LCID   WINAPI SFileSetLocale(LCID lcFileLocale);
 bool   WINAPI SFileOpenArchive(const TCHAR * szMpqName, DWORD dwPriority, DWORD dwFlags, HANDLE * phMpq);
 bool   WINAPI SFileCreateArchive(const TCHAR * szMpqName, DWORD dwCreateFlags, DWORD dwMaxFileCount, HANDLE * phMpq);
 bool   WINAPI SFileCreateArchive2(const TCHAR * szMpqName, PSFILE_CREATE_MPQ pCreateInfo, HANDLE * phMpq);
+
+// Memory-based archive functions
+bool   WINAPI SFileOpenArchiveFromMemory(LPBYTE pbBuffer, size_t cbBuffer, DWORD dwFlags, HANDLE * phMpq);
+bool   WINAPI SFileCreateArchiveInMemory(size_t cbInitialSize, DWORD dwCreateFlags, DWORD dwMaxFileCount, HANDLE * phMpq);
+bool   WINAPI SFileCreateArchiveInMemory2(size_t cbInitialSize, PSFILE_CREATE_MPQ pCreateInfo, HANDLE * phMpq);
+bool   WINAPI SFileGetArchiveBuffer(HANDLE hMpq, LPBYTE * ppbBuffer, size_t * pcbSize, bool bTransferOwnership);
 
 bool   WINAPI SFileSetDownloadCallback(HANDLE hMpq, SFILE_DOWNLOAD_CALLBACK DownloadCB, void * pvUserData);
 bool   WINAPI SFileFlushArchive(HANDLE hMpq);

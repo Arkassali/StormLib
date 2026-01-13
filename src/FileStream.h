@@ -148,6 +148,15 @@ union TBaseProviderData
         HANDLE hInternet;                   // Internet handle
         HANDLE hConnect;                    // Connection to the internet server
     } Http;
+
+    struct
+    {
+        LPBYTE pbBuffer;                    // Buffer pointer
+        ULONGLONG FileSize;                 // Logical file size (bytes written)
+        ULONGLONG FilePos;                  // Current read/write position
+        ULONGLONG BufferSize;               // Allocated capacity
+        BOOL bOwnsBuffer;                   // TRUE if stream should free buffer on close
+    } Mem;
 };
 
 struct TFileStream
@@ -213,5 +222,12 @@ struct TEncryptedStream : public TBlockStream
 {
     BYTE Key[MPQE_CHUNK_SIZE];              // File key
 };
+
+//-----------------------------------------------------------------------------
+// Public functions for memory stream support
+
+TFileStream * FileStream_OpenMemory(LPBYTE pbBuffer, size_t cbBuffer, DWORD dwStreamFlags);
+TFileStream * FileStream_CreateMemory(size_t cbInitialSize, DWORD dwStreamFlags);
+bool FileStream_GetBuffer(TFileStream * pStream, LPBYTE * ppbBuffer, size_t * pcbSize, bool bTransferOwnership);
 
 #endif // __FILESTREAM_H__

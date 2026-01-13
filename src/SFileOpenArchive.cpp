@@ -262,55 +262,21 @@ LCID WINAPI SFileSetLocale(LCID lcFileLocale)
 }
 
 //-----------------------------------------------------------------------------
-// SFileOpenArchive
-//
-//   szFileName - MPQ archive file name to open
-//   dwPriority - When SFileOpenFileEx called, this contains the search priority for searched archives
-//   dwFlags    - See MPQ_OPEN_XXX in StormLib.h
-//   phMpq      - Pointer to store open archive handle
+// Common helper function to open archive from an already-opened stream
 
-bool WINAPI SFileOpenArchive(
-    const TCHAR * szMpqName,
-    DWORD dwPriority,
+static DWORD OpenArchiveFromStream(
+    TFileStream * pStream,
+    LPCTSTR szMpqName,
+    ULONGLONG FileSize,
     DWORD dwFlags,
-    HANDLE * phMpq)
+    TMPQArchive ** pArchive)
 {
     TMPQUserData * pUserData = NULL;
-    TFileStream * pStream = NULL;       // Open file stream
-    TMPQArchive * ha = NULL;            // Archive handle
+    TMPQArchive * ha = NULL;
     TFileEntry * pFileEntry;
-    ULONGLONG FileSize = 0;             // Size of the file
-    LPBYTE pbHeaderBuffer = NULL;       // Buffer for searching MPQ header
-    DWORD dwStreamFlags = (dwFlags & STREAM_FLAGS_MASK);
+    LPBYTE pbHeaderBuffer = NULL;
     MTYPE MapType = MapTypeNotChecked;
     DWORD dwErrCode = ERROR_SUCCESS;
-
-    // Verify the parameters
-    if(szMpqName == NULL || *szMpqName == 0 || phMpq == NULL)
-    {
-        SErrSetLastError(ERROR_INVALID_PARAMETER);
-        return false;
-    }
-
-    // One time initialization of MPQ cryptography
-    InitializeMpqCryptography();
-    dwPriority = dwPriority;
-
-    // If not forcing MPQ v 1.0, also use file bitmap
-    dwStreamFlags |= (dwFlags & MPQ_OPEN_FORCE_MPQ_V1) ? 0 : STREAM_FLAG_USE_BITMAP;
-
-    // Open the MPQ archive file
-    pStream = FileStream_OpenFile(szMpqName, dwStreamFlags);
-    if(pStream == NULL)
-        return false;
-
-    // Check the file size. There must be at least 0x20 bytes
-    if(dwErrCode == ERROR_SUCCESS)
-    {
-        FileStream_GetSize(pStream, &FileSize);
-        if(FileSize < MPQ_HEADER_SIZE_V1)
-            dwErrCode = ERROR_BAD_FORMAT;
-    }
 
     // Allocate the MPQhandle
     if(dwErrCode == ERROR_SUCCESS)
@@ -342,7 +308,6 @@ bool WINAPI SFileOpenArchive(
         ha->dwValidFileFlags = MPQ_FILE_VALID_FLAGS;
         ha->pfnHashString = HashStringSlash;
         ha->pStream = pStream;
-        pStream = NULL;
 
         // Set the archive read only if the stream is read-only
         FileStream_GetFlags(ha->pStream, &dwStrmFlags);
@@ -628,15 +593,77 @@ bool WINAPI SFileOpenArchive(
     // Cleanup and exit
     if(dwErrCode != ERROR_SUCCESS)
     {
-        FileStream_Close(pStream);
         DereferenceArchive(ha);
-        SErrSetLastError(dwErrCode);
         ha = NULL;
     }
 
     // Free the header buffer
     if(pbHeaderBuffer != NULL)
         STORM_FREE(pbHeaderBuffer);
+    
+    *pArchive = ha;
+    return dwErrCode;
+}
+
+//-----------------------------------------------------------------------------
+// SFileOpenArchive
+//
+//   szFileName - MPQ archive file name to open
+//   dwPriority - When SFileOpenFileEx called, this contains the search priority for searched archives
+//   dwFlags    - See MPQ_OPEN_XXX in StormLib.h
+//   phMpq      - Pointer to store open archive handle
+
+bool WINAPI SFileOpenArchive(
+    const TCHAR * szMpqName,
+    DWORD dwPriority,
+    DWORD dwFlags,
+    HANDLE * phMpq)
+{
+    TFileStream * pStream = NULL;
+    TMPQArchive * ha = NULL;
+    ULONGLONG FileSize = 0;
+    DWORD dwStreamFlags = (dwFlags & STREAM_FLAGS_MASK);
+    DWORD dwErrCode = ERROR_SUCCESS;
+
+    // Verify the parameters
+    if(szMpqName == NULL || *szMpqName == 0 || phMpq == NULL)
+    {
+        SErrSetLastError(ERROR_INVALID_PARAMETER);
+        return false;
+    }
+
+    // One time initialization of MPQ cryptography
+    InitializeMpqCryptography();
+    dwPriority = dwPriority;
+
+    // If not forcing MPQ v 1.0, also use file bitmap
+    dwStreamFlags |= (dwFlags & MPQ_OPEN_FORCE_MPQ_V1) ? 0 : STREAM_FLAG_USE_BITMAP;
+
+    // Open the MPQ archive file
+    pStream = FileStream_OpenFile(szMpqName, dwStreamFlags);
+    if(pStream == NULL)
+        return false;
+
+    // Check the file size. There must be at least 0x20 bytes
+    FileStream_GetSize(pStream, &FileSize);
+    if(FileSize < MPQ_HEADER_SIZE_V1)
+    {
+        FileStream_Close(pStream);
+        SErrSetLastError(ERROR_BAD_FORMAT);
+        return false;
+    }
+
+    // Use the common opening logic
+    dwErrCode = OpenArchiveFromStream(pStream, szMpqName, FileSize, dwFlags, &ha);
+    
+    // Cleanup and exit
+    if(dwErrCode != ERROR_SUCCESS)
+    {
+        FileStream_Close(pStream);
+        SErrSetLastError(dwErrCode);
+        ha = NULL;
+    }
+
     if(phMpq != NULL)
         *phMpq = ha;
     return (dwErrCode == ERROR_SUCCESS);
@@ -783,4 +810,84 @@ bool WINAPI SFileCloseArchive(HANDLE hMpq)
     }
 
     return true;
+}
+
+//-----------------------------------------------------------------------------
+// bool WINAPI SFileOpenArchiveFromMemory(...)
+//
+// Opens an MPQ archive from an in-memory buffer
+//
+
+bool WINAPI SFileOpenArchiveFromMemory(
+    LPBYTE pbBuffer,
+    size_t cbBuffer,
+    DWORD dwFlags,
+    HANDLE * phMpq)
+{
+    TFileStream * pStream = NULL;
+    TMPQArchive * ha = NULL;
+    ULONGLONG FileSize = 0;
+    DWORD dwErrCode = ERROR_SUCCESS;
+
+    // Validate parameters
+    if(pbBuffer == NULL || cbBuffer == 0 || phMpq == NULL)
+    {
+        SErrSetLastError(ERROR_INVALID_PARAMETER);
+        return false;
+    }
+
+    // One time initialization of MPQ cryptography
+    InitializeMpqCryptography();
+
+    // Open memory stream
+    pStream = FileStream_OpenMemory(pbBuffer, cbBuffer, STREAM_FLAG_READ_ONLY);
+    if(pStream == NULL)
+        return false;
+
+    // Check the file size
+    FileStream_GetSize(pStream, &FileSize);
+    if(FileSize < MPQ_HEADER_SIZE_V1)
+    {
+        FileStream_Close(pStream);
+        SErrSetLastError(ERROR_BAD_FORMAT);
+        return false;
+    }
+
+    // Use the common opening logic - pass empty string for filename since we don't have one
+    dwErrCode = OpenArchiveFromStream(pStream, _T(""), FileSize, dwFlags, &ha);
+
+    // Cleanup and exit
+    if(dwErrCode != ERROR_SUCCESS)
+    {
+        FileStream_Close(pStream);
+        SErrSetLastError(dwErrCode);
+        ha = NULL;
+    }
+
+    if(phMpq != NULL)
+        *phMpq = ha;
+    return (dwErrCode == ERROR_SUCCESS);
+}
+
+//-----------------------------------------------------------------------------
+// bool WINAPI SFileGetArchiveBuffer(...)
+//
+// Gets the buffer from a memory-backed archive
+//
+
+bool WINAPI SFileGetArchiveBuffer(
+    HANDLE hMpq,
+    LPBYTE * ppbBuffer,
+    size_t * pcbSize,
+    bool bTransferOwnership)
+{
+    TMPQArchive * ha = IsValidMpqHandle(hMpq);
+    
+    if(ha == NULL)
+    {
+        SErrSetLastError(ERROR_INVALID_HANDLE);
+        return false;
+    }
+    
+    return FileStream_GetBuffer(ha->pStream, ppbBuffer, pcbSize, bTransferOwnership);
 }

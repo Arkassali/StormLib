@@ -888,6 +888,198 @@ static void BaseHttp_Init(TFileStream * pStream)
 }
 
 //-----------------------------------------------------------------------------
+// Local functions - base memory support
+
+static bool BaseMem_Grow(TFileStream * pStream, ULONGLONG MinSize)
+{
+    const ULONGLONG GrowthThreshold = 0x1000000;  // 16MB
+    const ULONGLONG MaxSize = 0x80000000ULL;      // 2GB max for 32-bit size_t safety
+    ULONGLONG NewSize = pStream->Base.Mem.BufferSize;
+    LPBYTE pbNewBuffer;
+
+    // Growth strategy: double until 16MB, then add 16MB increments
+    while (NewSize < MinSize)
+    {
+        if (NewSize < GrowthThreshold)
+        {
+            // Check for overflow before doubling
+            if (NewSize > MaxSize / 2)
+            {
+                SErrSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                return false;
+            }
+            NewSize *= 2;
+        }
+        else
+        {
+            // Check for overflow before adding
+            if (NewSize > MaxSize - GrowthThreshold)
+            {
+                SErrSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                return false;
+            }
+            NewSize += GrowthThreshold;
+        }
+    }
+
+    // Final limit check - 2GB max for 32-bit size_t safety
+    if (NewSize > MaxSize)
+    {
+        SErrSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return false;
+    }
+
+    pbNewBuffer = STORM_REALLOC(BYTE, pStream->Base.Mem.pbBuffer, (size_t)NewSize);
+    if (pbNewBuffer == NULL)
+    {
+        SErrSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return false;
+    }
+
+    pStream->Base.Mem.pbBuffer = pbNewBuffer;
+    pStream->Base.Mem.BufferSize = NewSize;
+    return true;
+}
+
+static bool BaseMem_Create(TFileStream * pStream)
+{
+    // Initial allocation - 64KB default, grows as needed
+    const ULONGLONG InitialSize = 0x10000;
+
+    pStream->Base.Mem.pbBuffer = STORM_ALLOC(BYTE, (size_t)InitialSize);
+    if (pStream->Base.Mem.pbBuffer == NULL)
+    {
+        SErrSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return false;
+    }
+
+    pStream->Base.Mem.FileSize = 0;
+    pStream->Base.Mem.FilePos = 0;
+    pStream->Base.Mem.BufferSize = InitialSize;
+    pStream->Base.Mem.bOwnsBuffer = TRUE;
+    return true;
+}
+
+static bool BaseMem_OpenBuffer(TFileStream * pStream, LPBYTE pbBuffer, ULONGLONG cbBuffer)
+{
+    pStream->Base.Mem.pbBuffer = pbBuffer;
+    pStream->Base.Mem.FileSize = cbBuffer;
+    pStream->Base.Mem.FilePos = 0;
+    pStream->Base.Mem.BufferSize = cbBuffer;
+    pStream->Base.Mem.bOwnsBuffer = FALSE;
+    return true;
+}
+
+static bool BaseMem_Open(TFileStream * pStream, const TCHAR * szFileName, DWORD dwStreamFlags)
+{
+    // Not used directly - see FileStream_OpenMemory
+    STORMLIB_UNUSED(pStream);
+    STORMLIB_UNUSED(szFileName);
+    STORMLIB_UNUSED(dwStreamFlags);
+    return false;
+}
+
+static bool BaseMem_Read(
+    TFileStream * pStream,
+    ULONGLONG * pByteOffset,
+    void * pvBuffer,
+    DWORD dwBytesToRead)
+{
+    ULONGLONG ByteOffset = (pByteOffset != NULL) ? *pByteOffset : pStream->Base.Mem.FilePos;
+
+    // Bounds check with overflow protection
+    if (dwBytesToRead > 0 && ByteOffset > pStream->Base.Mem.FileSize - dwBytesToRead)
+    {
+        SErrSetLastError(ERROR_HANDLE_EOF);
+        return false;
+    }
+
+    if (dwBytesToRead != 0)
+    {
+        memcpy(pvBuffer, pStream->Base.Mem.pbBuffer + ByteOffset, dwBytesToRead);
+    }
+
+    pStream->Base.Mem.FilePos = ByteOffset + dwBytesToRead;
+    return true;
+}
+
+static bool BaseMem_Write(
+    TFileStream * pStream,
+    ULONGLONG * pByteOffset,
+    const void * pvBuffer,
+    DWORD dwBytesToWrite)
+{
+    ULONGLONG ByteOffset = (pByteOffset != NULL) ? *pByteOffset : pStream->Base.Mem.FilePos;
+    ULONGLONG EndOffset;
+
+    // Check for overflow before computing EndOffset
+    if (dwBytesToWrite > 0 && ByteOffset > ULONGLONG_MAX - dwBytesToWrite)
+    {
+        SErrSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return false;
+    }
+
+    EndOffset = ByteOffset + dwBytesToWrite;
+
+    // Grow buffer if needed
+    if (EndOffset > pStream->Base.Mem.BufferSize)
+    {
+        if (!BaseMem_Grow(pStream, EndOffset))
+            return false;
+    }
+
+    if (dwBytesToWrite != 0)
+    {
+        memcpy(pStream->Base.Mem.pbBuffer + ByteOffset, pvBuffer, dwBytesToWrite);
+    }
+
+    pStream->Base.Mem.FilePos = EndOffset;
+
+    // Update file size if needed
+    if (EndOffset > pStream->Base.Mem.FileSize)
+        pStream->Base.Mem.FileSize = EndOffset;
+
+    return true;
+}
+
+static bool BaseMem_Resize(TFileStream * pStream, ULONGLONG NewFileSize)
+{
+    if (NewFileSize > pStream->Base.Mem.BufferSize)
+    {
+        if (!BaseMem_Grow(pStream, NewFileSize))
+            return false;
+    }
+
+    pStream->Base.Mem.FileSize = NewFileSize;
+    return true;
+}
+
+static void BaseMem_Close(TFileStream * pStream)
+{
+    if (pStream->Base.Mem.bOwnsBuffer && pStream->Base.Mem.pbBuffer != NULL)
+    {
+        STORM_FREE(pStream->Base.Mem.pbBuffer);
+    }
+
+    pStream->Base.Mem.pbBuffer = NULL;
+    pStream->Base.Mem.FileSize = 0;
+    pStream->Base.Mem.BufferSize = 0;
+    pStream->Base.Mem.bOwnsBuffer = FALSE;
+}
+
+static void BaseMem_Init(TFileStream * pStream)
+{
+    pStream->BaseCreate  = BaseMem_Create;
+    pStream->BaseOpen    = BaseMem_Open;
+    pStream->BaseRead    = BaseMem_Read;
+    pStream->BaseWrite   = BaseMem_Write;
+    pStream->BaseResize  = BaseMem_Resize;
+    pStream->BaseGetSize = BaseFile_GetSize;  // Reuse - TBaseData layout compatible
+    pStream->BaseGetPos  = BaseFile_GetPos;   // Reuse - TBaseData layout compatible
+    pStream->BaseClose   = BaseMem_Close;
+}
+
+//-----------------------------------------------------------------------------
 // Local functions - base block-based support
 
 // Generic function that loads blocks from the file
@@ -1059,12 +1251,13 @@ static void BlockStream_Close(TBlockStream * pStream)
 //-----------------------------------------------------------------------------
 // File stream allocation function
 
-static STREAM_INIT StreamBaseInit[4] =
+static STREAM_INIT StreamBaseInit[5] =
 {
     BaseFile_Init,
     BaseMap_Init,
     BaseHttp_Init,
-    BaseNone_Init
+    BaseNone_Init,
+    BaseMem_Init
 };
 
 // This function allocates an empty structure for the file stream
@@ -2885,6 +3078,163 @@ bool FileStream_Replace(TFileStream * pStream, TFileStream * pNewStream)
  *
  * \a pStream Pointer to an open stream
  */
+
+/**
+ * Opens an existing buffer as a file stream for reading
+ *
+ * The caller provides a buffer containing archive data. This function
+ * creates a memory stream that reads from the buffer. The buffer must
+ * remain valid for the lifetime of the stream.
+ *
+ * \a pbBuffer Pointer to buffer containing archive data
+ * \a cbBuffer Size of the buffer in bytes
+ * \a dwStreamFlags Stream flags (typically STREAM_FLAG_READ_ONLY)
+ *
+ * \returns
+ * - Pointer to opened stream on success
+ * - NULL on error, with error code set by SErrSetLastError()
+ */
+TFileStream * FileStream_OpenMemory(LPBYTE pbBuffer, size_t cbBuffer, DWORD dwStreamFlags)
+{
+    TFileStream * pStream;
+
+    // Validate parameters
+    if (pbBuffer == NULL || cbBuffer == 0)
+    {
+        SErrSetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    // Allocate stream structure (no filename needed for memory streams)
+    pStream = AllocateFileStream(_T(""), sizeof(TFileStream), dwStreamFlags | STREAM_FLAG_READ_ONLY);
+    if (pStream == NULL)
+        return NULL;
+
+    // Initialize base functions for memory provider
+    BaseMem_Init(pStream);
+
+    // Open the buffer as a memory stream
+    if (!BaseMem_OpenBuffer(pStream, pbBuffer, cbBuffer))
+    {
+        STORM_FREE(pStream);
+        return NULL;
+    }
+
+    // Set up stream read/write function pointers
+    pStream->StreamRead = pStream->BaseRead;
+    pStream->StreamWrite = pStream->BaseWrite;
+    pStream->StreamGetSize = pStream->BaseGetSize;
+    pStream->StreamGetPos = pStream->BaseGetPos;
+    pStream->StreamClose = pStream->BaseClose;
+    pStream->StreamResize = pStream->BaseResize;
+
+    // Initialize stream size and position
+    pStream->StreamSize = cbBuffer;
+    pStream->StreamPos = 0;
+
+    return pStream;
+}
+
+/**
+ * Creates a new writable file stream in memory
+ *
+ * Allocates a memory buffer that grows dynamically as data is written.
+ * After writing the archive, call FileStream_GetBuffer to extract the
+ * final buffer.
+ *
+ * \a cbInitialSize Initial size hint for the buffer (can grow if needed)
+ * \a dwStreamFlags Stream flags
+ *
+ * \returns
+ * - Pointer to created stream on success
+ * - NULL on error, with error code set by SErrSetLastError()
+ */
+TFileStream * FileStream_CreateMemory(size_t cbInitialSize, DWORD dwStreamFlags)
+{
+    TFileStream * pStream;
+
+    // Allocate stream structure
+    pStream = AllocateFileStream(_T(""), sizeof(TFileStream), dwStreamFlags);
+    if (pStream == NULL)
+        return NULL;
+
+    // Initialize base functions for memory provider
+    BaseMem_Init(pStream);
+
+    // Create the memory buffer
+    if (!pStream->BaseCreate(pStream))
+    {
+        STORM_FREE(pStream);
+        return NULL;
+    }
+
+    // If an initial size was requested and we created a default size, grow to initial size
+    if (cbInitialSize > 0 && cbInitialSize > pStream->Base.Mem.BufferSize)
+    {
+        if (!BaseMem_Grow(pStream, cbInitialSize))
+        {
+            FileStream_Close(pStream);
+            return NULL;
+        }
+    }
+
+    // Set up stream read/write function pointers
+    pStream->StreamRead = pStream->BaseRead;
+    pStream->StreamWrite = pStream->BaseWrite;
+    pStream->StreamGetSize = pStream->BaseGetSize;
+    pStream->StreamGetPos = pStream->BaseGetPos;
+    pStream->StreamClose = pStream->BaseClose;
+    pStream->StreamResize = pStream->BaseResize;
+
+    // Initialize stream size and position
+    pStream->StreamSize = 0;
+    pStream->StreamPos = 0;
+
+    return pStream;
+}
+
+/**
+ * Extracts the buffer from a memory stream
+ *
+ * Retrieves the underlying buffer and optionally transfers ownership
+ * to the caller. If ownership is transferred, the stream will not
+ * free the buffer on close.
+ *
+ * \a pStream Pointer to a memory stream
+ * \a ppbBuffer Pointer to receive buffer pointer
+ * \a pcbSize Pointer to receive buffer size in bytes
+ * \a bTransferOwnership If true, caller assumes responsibility for freeing buffer
+ *
+ * \returns
+ * - true if buffer extracted successfully
+ * - false if not a memory stream or parameters are invalid
+ */
+bool FileStream_GetBuffer(TFileStream * pStream, LPBYTE * ppbBuffer, size_t * pcbSize, bool bTransferOwnership)
+{
+    if (pStream == NULL || ppbBuffer == NULL || pcbSize == NULL)
+    {
+        SErrSetLastError(ERROR_INVALID_PARAMETER);
+        return false;
+    }
+
+    // Verify this is a memory stream by checking if BaseRead points to memory implementation
+    if (pStream->BaseRead != BaseMem_Read)
+    {
+        SErrSetLastError(ERROR_INVALID_HANDLE);
+        return false;
+    }
+
+    *ppbBuffer = pStream->Base.Mem.pbBuffer;
+    *pcbSize = (size_t)pStream->Base.Mem.FileSize;
+
+    if (bTransferOwnership)
+    {
+        pStream->Base.Mem.bOwnsBuffer = FALSE;
+    }
+
+    return true;
+}
+
 void FileStream_Close(TFileStream * pStream)
 {
     // Check if the stream structure is allocated at all
