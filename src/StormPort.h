@@ -325,6 +325,7 @@
   typedef unsigned char  BYTE;
   typedef unsigned short USHORT;
   typedef int            LONG;
+  typedef int            BOOL;
   typedef unsigned int   DWORD;
   typedef unsigned long  DWORD_PTR;
   typedef long           LONG_PTR;
@@ -350,6 +351,18 @@
   // Some Windows-specific defines
   #ifndef MAX_PATH
     #define MAX_PATH 1024
+  #endif
+
+  #ifndef TRUE
+    #define TRUE 1
+  #endif
+
+  #ifndef FALSE
+    #define FALSE 0
+  #endif
+
+  #ifndef ULONGLONG_MAX
+    #define ULONGLONG_MAX 0xFFFFFFFFFFFFFFFFULL
   #endif
 
   #define WINAPI
